@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monitor de Ruído - FastAPI + Docker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --green:  #00e5a0;
+            --yellow: #fbbf24;
+            --orange: #f97316;
+            --red:    #ef4444;
+            --bg:     #080c10;
+            --card:   #0e1318;
+            --border: #1a2230;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            font-family: 'DM Sans', sans-serif;
+            background: var(--bg);
+            color: #e2e8f0;
+            min-height: 100vh;
+        }
+
+        .mono { font-family: 'Space Mono', monospace; }
+
+        /* ── Silence Warning Banner ── */
+        #silence-banner {
+            display: none;
+            background: linear-gradient(90deg, #7f1d1d 0%, #991b1b 50%, #7f1d1d 100%);
+            background-size: 200% 100%;
+            animation: slide-bg 3s linear infinite, fadeIn .4s ease;
+            border-bottom: 2px solid #ef4444;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        #silence-banner.active { display: block; }
+
+        @keyframes slide-bg {
+            0%   { background-position: 0% 0; }
+            100% { background-position: -200% 0; }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-8px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        /* ── Clock ── */
+        #clock-display {
+            font-family: 'Space Mono', monospace;
+            font-size: clamp(2.2rem, 5vw, 3.5rem);
+            letter-spacing: .08em;
+            line-height: 1;
+            transition: color .5s;
+        }
+
+        #clock-display.silence-time { color: #ef4444; text-shadow: 0 0 24px rgba(239,68,68,.5); }
+        #clock-display.normal-time  { color: var(--green); text-shadow: 0 0 20px rgba(0,229,160,.25); }
+
+        /* ── Rate pill ── */
+        .rate-bar-wrap {
+            background: #1a2230;
+            border-radius: 99px;
+            height: 6px;
+            overflow: hidden;
+            margin-top: 6px;
+        }
+        .rate-bar-fill {
+            height: 100%;
+            border-radius: 99px;
+            transition: width .6s ease, background .4s;
+        }
+
+        /* ── Noise badges ── */
+        .badge {
+            display: inline-block;
+            padding: 2px 12px;
+            border-radius: 99px;
+            font-size: .7rem;
+            font-weight: 700;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+        }
+        .badge-baixo     { background: rgba(0,229,160,.15); color: var(--green); border: 1px solid rgba(0,229,160,.3); }
+        .badge-medio     { background: rgba(251,191,36,.12); color: var(--yellow); border: 1px solid rgba(251,191,36,.3); }
+        .badge-alto      { background: rgba(249,115,22,.12); color: var(--orange); border: 1px solid rgba(249,115,22,.3); }
+        .badge-muito_alto{ background: rgba(239,68,68,.12);  color: var(--red);    border: 1px solid rgba(239,68,68,.3); }
+
+        /* ── Card ── */
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+        }
+
+        /* ── Table ── */
+        tbody tr { transition: background .15s; }
+        tbody tr:hover { background: rgba(255,255,255,.03); }
+
+        /* ── Pulse dot ── */
+        .pulse-dot {
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: var(--green);
+            box-shadow: 0 0 0 0 rgba(0,229,160,.6);
+            animation: pulse-ring 2s infinite;
+        }
+        .pulse-dot.red {
+            background: var(--red);
+            box-shadow: 0 0 0 0 rgba(239,68,68,.6);
+        }
+        @keyframes pulse-ring {
+            0%   { box-shadow: 0 0 0 0 rgba(0,229,160,.6); }
+            70%  { box-shadow: 0 0 0 8px rgba(0,229,160,0); }
+            100% { box-shadow: 0 0 0 0 rgba(0,229,160,0); }
+        }
+
+        /* ── Big RMS value ── */
+        #latest-rms {
+            font-family: 'Space Mono', monospace;
+            font-size: clamp(2.4rem, 4vw, 3.8rem);
+            font-weight: 700;
+            line-height: 1;
+            color: var(--green);
+            transition: color .4s;
+        }
+
+        /* ── Scrollbar ── */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    </style>
+</head>
+<body>
+
+    <!-- ── Silence Warning Banner ── -->
+    <div id="silence-banner" class="px-6 py-3">
+        <div class="max-w-7xl mx-auto flex items-center gap-4">
+            <span class="text-2xl">🔇</span>
+            <div>
+                <p class="font-bold text-red-100 text-sm tracking-wide">HORÁRIO DA LEI DO SILÊNCIO ATIVO</p>
+                <p class="text-red-200 text-xs">Das 22h às 6h é proibido produzir ruídos que perturbem o sossego público.</p>
+            </div>
+            <div id="banner-noise-alert" class="ml-auto text-right hidden">
+                <p class="text-red-100 font-bold text-xs">⚠️ RUÍDO DETECTADO FORA DO PERMITIDO</p>
+                <p class="text-red-300 text-xs mono" id="banner-last-level">—</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="max-w-7xl mx-auto px-6 py-8">
+
+        <!-- ── Header ── -->
+        <div class="flex flex-col md:flex-row md:items-start justify-between gap-6 mb-8">
+            <div>
+                <h1 class="text-2xl font-semibold tracking-tight flex items-center gap-3">
+                    <span class="text-gray-500 mono text-sm font-normal">ESP32 /</span>
+                    Monitor de Ruído
+                </h1>
+                <p class="text-gray-500 text-sm mt-1">Dados em tempo real · atualiza a cada 5 segundos</p>
+            </div>
+
+            <!-- ── Clock Block ── -->
+            <div class="card px-6 py-4 text-center min-w-[220px]">
+                <p class="text-xs uppercase tracking-widest text-gray-500 mb-1">Horário de Captação</p>
+                <div id="clock-display" class="normal-time">00:00:00</div>
+                <div class="mt-2 flex items-center justify-center gap-2">
+                    <div id="status-dot" class="pulse-dot"></div>
+                    <span id="clock-label" class="text-xs text-gray-400">Horário normal</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Latest Reading ── -->
+        <div class="card p-6 mb-6 grid grid-cols-2 md:grid-cols-4 gap-6">
+            <div>
+                <p class="text-xs uppercase tracking-widest text-gray-500 mb-2">Sensor</p>
+                <p id="latest-sensor" class="mono text-lg font-bold text-white">—</p>
+            </div>
+            <div>
+                <p class="text-xs uppercase tracking-widest text-gray-500 mb-2">Localização</p>
+                <p id="latest-location" class="text-lg font-semibold text-white">—</p>
+            </div>
+            <div>
+                <p class="text-xs uppercase tracking-widest text-gray-500 mb-2">Nível de Ruído</p>
+                <div id="latest-level-wrap">
+                    <span id="latest-level" class="badge badge-baixo">—</span>
+                </div>
+                <p id="silence-noise-warn" class="text-red-400 text-xs mt-2 hidden font-semibold">⚠️ Ruído no horário de silêncio!</p>
+            </div>
+            <div>
+                <p class="text-xs uppercase tracking-widest text-gray-500 mb-2">RMS</p>
+                <div id="latest-rms">—</div>
+                <p class="text-xs text-gray-500 mt-1">última medição</p>
+            </div>
+        </div>
+
+        <!-- ── Rate Limit + Status Row ── -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+
+            <!-- Rate Limit Card -->
+            <div class="card p-5">
+                <div class="flex justify-between items-center mb-3">
+                    <p class="text-xs uppercase tracking-widest text-gray-500">Rate Limit (por minuto)</p>
+                    <span id="rate-count-badge" class="mono text-xs text-gray-300 bg-gray-800 px-3 py-1 rounded-full">0 / 100</span>
+                </div>
+                <div class="rate-bar-wrap">
+                    <div id="rate-bar" class="rate-bar-fill" style="width:0%; background: var(--green);"></div>
+                </div>
+                <p id="rate-msg" class="text-xs text-gray-500 mt-2">Aguardando leituras...</p>
+            </div>
+
+            <!-- Connection Status -->
+            <div class="card p-5 flex items-center gap-4">
+                <div id="conn-dot" class="pulse-dot flex-shrink-0"></div>
+                <div>
+                    <p class="text-xs uppercase tracking-widest text-gray-500 mb-1">Status</p>
+                    <p id="conn-label" class="text-sm font-medium text-white">Aguardando dados...</p>
+                    <p id="last-ip" class="mono text-xs text-gray-500 mt-0.5">IP: —</p>
+                </div>
+                <a href="/api/readings" target="_blank"
+                   class="ml-auto px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-xl text-xs font-medium transition-colors flex-shrink-0">
+                    JSON ↗
+                </a>
+            </div>
+        </div>
+
+        <!-- ── Table + Chart ── -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+            <!-- Table -->
+            <div class="lg:col-span-7 card p-6">
+                <div class="flex justify-between items-center mb-5">
+                    <h2 class="font-semibold">Histórico de Leituras</h2>
+                    <span id="total-readings" class="mono text-xs text-gray-400 bg-gray-800 px-3 py-1 rounded-full">0 leituras</span>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="border-b border-gray-800 text-xs uppercase text-gray-500">
+                                <th class="text-left py-3 px-3">Data/Hora</th>
+                                <th class="text-left py-3 px-3">Sensor</th>
+                                <th class="text-left py-3 px-3">Local</th>
+                                <th class="text-left py-3 px-3">IP</th>
+                                <th class="text-right py-3 px-3">RMS</th>
+                                <th class="text-center py-3 px-3">Nível</th>
+                                <th class="text-center py-3 px-3">🔇</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body" class="divide-y divide-gray-800/60 text-gray-300">
+                            <tr><td colspan="7" class="text-center py-8 text-gray-600">Aguardando dados do sensor...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Chart -->
+            <div class="lg:col-span-5 card p-6">
+                <h2 class="font-semibold mb-5">Intensidade RMS</h2>
+                <div style="height:280px; position:relative;">
+                    <canvas id="rmsChart"></canvas>
+                </div>
+                <p class="text-xs text-gray-600 text-center mt-3">
+                    Últimas 30 leituras · atualização automática
+                </p>
+            </div>
+        </div>
+
+        <!-- ── Footer ── -->
+        <div class="mt-10 text-xs text-gray-600 text-center mono">
+            POST <span class="text-gray-500">http://SEU-IP:5000/api/noise</span>
+            · Rate limit: 100 req/min por sensor
+            · Lei do Silêncio: 22h–6h
+        </div>
+    </div>
+
+<script>
+    // ─────────────────────────────────────────
+    // CLOCK + SILENCE DETECTION
+    // ─────────────────────────────────────────
+    function isSilencePeriod(hour) {
+        return hour >= 22 || hour < 6;
+    }
+
+    function updateClock() {
+        const now   = new Date();
+        const h     = String(now.getHours()).padStart(2, '0');
+        const m     = String(now.getMinutes()).padStart(2, '0');
+        const s     = String(now.getSeconds()).padStart(2, '0');
+        const hour  = now.getHours();
+        const quiet = isSilencePeriod(hour);
+
+        const clockEl  = document.getElementById('clock-display');
+        const labelEl  = document.getElementById('clock-label');
+        const bannerEl = document.getElementById('silence-banner');
+        const dotEl    = document.getElementById('status-dot');
+
+        clockEl.textContent = `${h}:${m}:${s}`;
+
+        if (quiet) {
+            clockEl.className = 'silence-time';
+            labelEl.textContent = '🔇 Lei do Silêncio ativa';
+            labelEl.style.color = '#ef4444';
+            bannerEl.classList.add('active');
+            dotEl.classList.add('red');
+        } else {
+            clockEl.className = 'normal-time';
+            labelEl.textContent = 'Horário normal';
+            labelEl.style.color = '';
+            bannerEl.classList.remove('active');
+            dotEl.classList.remove('red');
+        }
+    }
+
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    // ─────────────────────────────────────────
+    // CHART
+    // ─────────────────────────────────────────
+    let rmsChart = null;
+
+    function buildChart() {
+        const ctx = document.getElementById('rmsChart');
+        rmsChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'RMS',
+                    data: [],
+                    borderColor: '#00e5a0',
+                    backgroundColor: 'rgba(0,229,160,0.06)',
+                    borderWidth: 2,
+                    tension: 0.35,
+                    pointRadius: 2,
+                    pointHoverRadius: 5,
+                    fill: true
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: { duration: 400 },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: '#0e1318',
+                        borderColor: '#1a2230',
+                        borderWidth: 1,
+                        titleColor: '#94a3b8',
+                        bodyColor: '#00e5a0',
+                        bodyFont: { family: 'Space Mono', size: 12 }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: 'rgba(255,255,255,0.04)' },
+                        ticks: { color: '#475569', font: { family: 'Space Mono', size: 10 } }
+                    },
+                    x: {
+                        grid: { color: 'rgba(255,255,255,0.04)' },
+                        ticks: { color: '#475569', font: { family: 'Space Mono', size: 9 }, maxRotation: 45 }
+                    }
+                }
+            }
+        });
+    }
+
+    function updateChart(data) {
+        const recent = data.slice(0, 30).reverse();
+        const labels = recent.map(r => {
+            const parts = r.received_at.split(' ');
+            return parts[1] ? parts[1] : r.received_at;
+        });
+        const values = recent.map(r => r.rms);
+
+        // Color the line based on last level
+        const last = recent[recent.length - 1];
+        const colorMap = { baixo: '#00e5a0', medio: '#fbbf24', alto: '#f97316', muito_alto: '#ef4444' };
+        const col = last ? (colorMap[last.noise_level] || '#00e5a0') : '#00e5a0';
+
+        rmsChart.data.labels = labels;
+        rmsChart.data.datasets[0].data = values;
+        rmsChart.data.datasets[0].borderColor = col;
+        rmsChart.data.datasets[0].backgroundColor = col.replace(')', ',0.06)').replace('rgb', 'rgba');
+        rmsChart.update();
+    }
+
+    // ─────────────────────────────────────────
+    // RATE LIMIT STATUS
+    // ─────────────────────────────────────────
+    async function updateRateStatus() {
+        try {
+            const res  = await fetch('/api/rate-status');
+            const data = await res.json();
+            const sensors = Object.values(data);
+            if (sensors.length === 0) return;
+
+            // Aggregate (or just take the first sensor if you have one)
+            const s = sensors[0];
+            const pct = Math.min(100, (s.count / s.limit) * 100);
+
+            document.getElementById('rate-count-badge').textContent = `${s.count} / ${s.limit}`;
+
+            const bar = document.getElementById('rate-bar');
+            bar.style.width = pct + '%';
+
+            if (pct < 60)       bar.style.background = 'var(--green)';
+            else if (pct < 85)  bar.style.background = 'var(--yellow)';
+            else                bar.style.background = 'var(--red)';
+
+            const msg = document.getElementById('rate-msg');
+            if (pct >= 100) {
+                msg.textContent = `⛔ Limite atingido · reinicia em ${s.remaining_in_window}s`;
+                msg.style.color = '#ef4444';
+            } else {
+                msg.textContent = `${100 - s.count} leituras restantes neste minuto`;
+                msg.style.color = '#64748b';
+            }
+        } catch(_) {}
+    }
+
+    // ─────────────────────────────────────────
+    // BADGE HELPER
+    // ─────────────────────────────────────────
+    const badgeClass = {
+        baixo:     'badge badge-baixo',
+        medio:     'badge badge-medio',
+        alto:      'badge badge-alto',
+        muito_alto:'badge badge-muito_alto'
+    };
+
+    function levelBadge(level) {
+        const cls = badgeClass[level] || 'badge';
+        return `<span class="${cls}">${level.replace('_',' ')}</span>`;
+    }
+
+    // ─────────────────────────────────────────
+    // MAIN DATA FETCH
+    // ─────────────────────────────────────────
+    async function loadData() {
+        try {
+            const res  = await fetch('/api/readings');
+            const data = await res.json();
+
+            document.getElementById('total-readings').textContent = `${data.length} leituras`;
+
+            if (data.length > 0) {
+                const latest = data[0];
+                const quiet  = isSilencePeriod(new Date().getHours());
+
+                document.getElementById('latest-sensor').textContent   = latest.sensor_id;
+                document.getElementById('latest-location').textContent = latest.location;
+                document.getElementById('latest-rms').textContent      = latest.rms.toFixed(1);
+
+                // Level badge
+                document.getElementById('latest-level').outerHTML =
+                    `<span id="latest-level" class="${badgeClass[latest.noise_level] || 'badge'}">${latest.noise_level.replace('_',' ')}</span>`;
+
+                // Silence + noise warning
+                const silenceWarn = document.getElementById('silence-noise-warn');
+                const bannerAlert = document.getElementById('banner-noise-alert');
+                const bannerLevel = document.getElementById('banner-last-level');
+
+                if (quiet && latest.noise_level !== 'baixo') {
+                    silenceWarn.classList.remove('hidden');
+                    bannerAlert.classList.remove('hidden');
+                    bannerLevel.textContent = `Último nível: ${latest.noise_level.replace('_',' ')} — RMS ${latest.rms.toFixed(0)}`;
+                } else {
+                    silenceWarn.classList.add('hidden');
+                    bannerAlert.classList.add('hidden');
+                }
+
+                // Connection status
+                document.getElementById('conn-label').textContent = `Dados recebidos · seq #${latest.sequence}`;
+                document.getElementById('last-ip').textContent    = `IP: ${latest.source_ip}`;
+            }
+
+            // Table (15 rows)
+            const tbody = document.getElementById('table-body');
+            tbody.innerHTML = '';
+            data.slice(0, 15).forEach(r => {
+                const silenceIcon = r.is_silence_period
+                    ? '<span title="Registrado no horário de silêncio">🔇</span>'
+                    : '<span class="text-gray-700">—</span>';
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="py-3 px-3 mono text-xs text-gray-400">${r.received_at}</td>
+                    <td class="py-3 px-3 mono text-xs">${r.sensor_id}</td>
+                    <td class="py-3 px-3 text-xs">${r.location}</td>
+                    <td class="py-3 px-3 mono text-xs text-gray-500">${r.source_ip}</td>
+                    <td class="py-3 px-3 text-right mono text-xs">${r.rms.toFixed(1)}</td>
+                    <td class="py-3 px-3 text-center">${levelBadge(r.noise_level)}</td>
+                    <td class="py-3 px-3 text-center text-sm">${silenceIcon}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            updateChart(data);
+        } catch(e) {
+            console.error('Erro ao buscar dados:', e);
+            document.getElementById('conn-label').textContent = 'Erro de conexão com a API';
+            document.getElementById('conn-dot').classList.add('red');
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // INIT
+    // ─────────────────────────────────────────
+    window.onload = function () {
+        buildChart();
+        loadData();
+        updateRateStatus();
+        setInterval(loadData, 5000);
+        setInterval(updateRateStatus, 5000);
+        console.log('%c📡 Monitor de Ruído v3.0', 'color:#00e5a0; font-family:monospace; font-size:14px');
+    };
+</script>
+</body>
+</html>

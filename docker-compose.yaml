@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+
+  db:
+    image: postgres:16-alpine
+    container_name: noise_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-noisedb}
+      POSTGRES_USER: ${POSTGRES_USER:-noiseuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-noisepass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-noiseuser} -d ${POSTGRES_DB:-noisedb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: noise_app
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-noiseuser}:${POSTGRES_PASSWORD:-noisepass}@db:5432/${POSTGRES_DB:-noisedb}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-100}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-60}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
